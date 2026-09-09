@@ -85,7 +85,7 @@ be honest, so the app counts them but leaves them out of the statistics.
 ## Download and run
 
 **macOS (Apple Silicon) — no Python, no terminal:** take the zip from
-[**Releases**](https://github.com/EfeUtku0/SEM-Particle-Analyzer/releases/latest),
+[**Releases**](https://github.com/EfeUtku0/BiSn-Particle-SEM-Analyzer/releases/latest),
 unzip it, drag the app into Applications, and on the **first launch right-click
 it → Open → Open** (a plain double-click gets refused: the app is unsigned).
 Everything it needs is inside the bundle, including the models — it never asks
@@ -95,8 +95,8 @@ for the internet.
 of free disk**:
 
 ```bash
-git clone https://github.com/EfeUtku0/SEM-Particle-Analyzer.git
-cd SEM-Particle-Analyzer
+git clone https://github.com/EfeUtku0/BiSn-Particle-SEM-Analyzer.git
+cd BiSn-Particle-SEM-Analyzer
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt      # Windows: .venv\Scripts\pip
 .venv/bin/python app/gui.py                    # Windows: .venv\Scripts\python app\gui.py
