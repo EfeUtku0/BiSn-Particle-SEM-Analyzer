@@ -10,6 +10,14 @@ The one file whose failure modes are unforgiving, so the rules here are hard:
     file behind as .bak. The backup is made by RENAMING the old file into
     place, not copying it — the session runs to hundreds of megabytes and a
     copy on every save was punishing on a small machine.
+  * WRITE ATOMICALLY (2026-09-22). The new session goes to a temporary file
+    first and only replaces session.pkl once it is complete on disk. It used
+    to be written straight into place: a crash or power cut mid-save left a
+    half-written session.pkl beside a good .bak.
+  * A SESSION THAT WILL NOT OPEN IS NOT THE END. The loader falls back to .bak
+    and says so. It used to come up empty without a word — and the next save
+    then rotated the damaged file over the good .bak, losing both. A damaged
+    file is set aside as session.pkl.damaged-<time>, never rotated into .bak.
 
 Analyses are pickled objects, so `Particle` and `Analysis` are stored by their
 module path (`analyze`). Renaming that module would make every existing
@@ -18,6 +26,7 @@ session unreadable; it must keep its name.
 from __future__ import annotations
 
 import os
+import time
 import traceback
 
 from PySide6 import QtCore, QtWidgets
@@ -59,23 +68,16 @@ class SessionStore:
     def _save_session(self):
         """Persist the analyses so closing the app doesn't lose them."""
         import pickle
+        tmp = None
         try:
             p = _session_path()
-            # never let an empty run wipe a session that still holds analyses,
-            # and always keep the previous file as .bak (a bad save used to be
-            # unrecoverable — the user lost a session that way)
-            if os.path.exists(p):
-                try:
-                    if not self.results and os.path.getsize(p) > 200:
-                        return
-                    # RENAME the old file into place as the backup instead of
-                    # copying it: the session is hundreds of MB, and a copy meant
-                    # reading and writing all of it on every save — painful on an
-                    # 8 GB machine. A rename is instant and just as safe (the old
-                    # file survives untouched if the new write fails).
-                    os.replace(p, p + ".bak")
-                except OSError:
-                    pass
+            # never let an empty run wipe a session that still holds analyses
+            try:
+                if (os.path.exists(p) and not self.results
+                        and os.path.getsize(p) > 200):
+                    return
+            except OSError:
+                pass
             data = {"version": SESSION_VERSION,
                     "results": self.results,
                     "chosen": self.chosen,
@@ -93,10 +95,34 @@ class SessionStore:
                     "review_meta": self.review_meta,
                     # small UI choices worth surviving a restart — see _prefs
                     "prefs": self._prefs()}
-            with open(_session_path(), "wb") as f:
+            # 1) the whole new session goes to a temporary file first
+            tmp = p + ".writing"
+            with open(tmp, "wb") as f:
                 pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+                f.flush()
+                os.fsync(f.fileno())
+            # 2) only now does the old file step aside. RENAMED into .bak, not
+            #    copied: the session is hundreds of MB, and a copy meant reading
+            #    and writing all of it on every save — painful on an 8 GB
+            #    machine. A file that failed to load is NOT the last good
+            #    session: it goes aside under its own name and .bak is kept.
+            if os.path.exists(p):
+                if getattr(self, "_session_damaged", False):
+                    os.replace(p, p + time.strftime(".damaged-%Y%m%d-%H%M%S"))
+                else:
+                    os.replace(p, p + ".bak")
+            # 3) the complete new file takes its place
+            os.replace(tmp, p)
+            tmp = None
+            self._session_damaged = False
         except Exception:
             traceback.print_exc()      # never let saving break the app
+        finally:
+            if tmp is not None and os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
 
     def _load_session(self):
         """Restore the previous session. Anything incompatible (old app
@@ -106,8 +132,31 @@ class SessionStore:
             p = _session_path()
             if not os.path.exists(p):
                 return
-            with open(p, "rb") as f:
-                data = pickle.load(f)
+            data, restored = None, False
+            for cand in (p, p + ".bak"):
+                if not os.path.exists(cand):
+                    continue
+                try:
+                    with open(cand, "rb") as f:
+                        data = pickle.load(f)
+                    if not isinstance(data, dict):
+                        raise ValueError("not a session")
+                    restored = cand != p
+                    break
+                except Exception:
+                    traceback.print_exc()
+                    data = None
+                    if cand == p:
+                        # remembered for _save_session: this file must not be
+                        # rotated over the good .bak
+                        self._session_damaged = True
+            if data is None:
+                QtWidgets.QMessageBox.warning(
+                    self, "Session could not be opened",
+                    "The saved session and its backup could not be read, so the "
+                    "app started without your previous analyses.\n\n"
+                    f"Both files were kept untouched in:\n{os.path.dirname(p)}")
+                return
             ver = data.get("version")
             if ver not in (1, SESSION_VERSION):
                 return
@@ -189,6 +238,9 @@ class SessionStore:
             # dots have to be asked for explicitly here.
             self._restyle_rows()
             msg = f"Restored {len(results)} analysis(es) from the last session."
+            if restored:
+                msg = ("The session file was damaged — restored "
+                       f"{len(results)} analysis(es) from its backup.")
             if rmap:            # the local, not self. — the attribute only
                                 # exists once _load_library has run, and this
                                 # bare access aborted the tail of the restore
